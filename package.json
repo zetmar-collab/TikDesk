@@ -1,0 +1,46 @@
+{
+  "name": "tikdesk",
+  "version": "1.2.0",
+  "description": "Nieoficjalna aplikacja Windows do mobilnej strony TikToka",
+  "author": "TikDesk contributors",
+  "license": "MIT",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "test:smoke": "electron . --smoke-test",
+    "test:preferences": "node scripts/test-preferences.cjs",
+    "build": "electron-builder --win nsis --x64",
+    "build:dir": "electron-builder --win --x64 --dir"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "pl.tikdesk.desktop",
+    "productName": "TikDesk",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/icon.ico",
+      "package.json",
+      "LICENSE"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico",
+      "signExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "TikDesk",
+      "artifactName": "TikDesk-Setup-${version}.${ext}"
+    }
+  }
+}
