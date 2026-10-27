@@ -7,6 +7,9 @@ function normalizePreferences(value) {
     mode: ['mobile', 'desktop'].includes(input.mode) ? input.mode : DEFAULTS.mode,
     theme: ['dark', 'light', 'system'].includes(input.theme) ? input.theme : DEFAULTS.theme,
     muted: typeof input.muted === 'boolean' ? input.muted : DEFAULTS.muted,
+    downloadDirectory: typeof input.downloadDirectory === 'string' && require('node:path').isAbsolute(input.downloadDirectory) ? input.downloadDirectory : '',
+    startup: input.startup === 'last' ? 'last' : 'home',
+    lastUrl: require('./policy.cjs').isTikTok(input.lastUrl) ? input.lastUrl : 'https://www.tiktok.com/',
     window: {
       width: dimension(input.window?.width, 800, DEFAULTS.window.width),
       height: dimension(input.window?.height, 640, DEFAULTS.window.height),

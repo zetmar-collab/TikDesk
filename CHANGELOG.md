@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0 — 2026-10-27
+
+- Naprawiono przywracanie widoku po błędzie podczas używania Wstecz/Dalej oraz skróty w lokalnym interfejsie.
+- Pobieranie jest anulowalne, ma limity czasu i sprawdza strukturę MP4 przed zastąpieniem wybranego pliku.
+- Dodano panel pobrań z historią, ponawianiem i otwieraniem plików/folderów; zamknięcie podczas pobierania wymaga decyzji.
+- Kopiowanie linku dotyczy oglądanego filmu, a nie adresu feedu.
+- Dodano folder pobierania, ustawienia startu, zakładki i ręczne sprawdzanie aktualizacji GitHub.
+- Naprawiono synchronizację systemowego motywu TikToka i rozszerzono testy przywracania ustawień.
+- Rozdzielono obsługę transferu, walidacji pliku, sieci, skrótów i aktualizacji na moduły; dodano workflow testów Windows.
+
 ## 1.2.0 — 2026-10-25
 
 - Widoczny pasek z podpisanymi przyciskami Wstecz, Dalej, Ekran główny i Odśwież.

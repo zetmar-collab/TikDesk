@@ -1,0 +1,22 @@
+.sidebar { overflow-y: auto; }
+.library-actions { margin-top: 14px; }
+.account-card { flex-shrink: 0; margin-top: 18px; }
+.record-list { display: grid; gap: 12px; margin-top: 20px; }
+.record { border: 1px solid #343e4f; background: #101620; padding: 15px; border-radius: 10px; }
+.record strong { display: block; overflow-wrap: anywhere; font-size: 13px; }
+.record p { margin: 8px 0; }
+.record .record-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.secondary, .record button { border: 1px solid #3a4b5f; border-radius: 6px; padding: 8px 12px; font-size: 11px; background: #233145; }
+.record button:hover, .secondary:hover { background: #334a60; }
+.record .path-label { font-size: 10px; opacity: .8; }
+.path-label { overflow-wrap: anywhere; }
+#settings-dialog select { display: block; width: 100%; border: 1px solid #3a4b5f; border-radius: 7px; background: #101620; color: #f4f6fc; padding: 10px; }
+.setting-note { font-size: 11px; }
+#settings-save { margin-left: 8px; }
+dialog hr { border: 0; border-top: 1px solid #344053; margin: 25px 0; }
+dialog h3 { font-size: 17px; margin-bottom: 8px; }
+#toast { left: 18px; bottom: 18px; width: 178px; transform: none; padding: 12px; overflow-wrap: anywhere; }
+:root[data-theme="light"] .record { background: #f3f6fa; border-color: #cbd6e4; }
+:root[data-theme="light"] .secondary, :root[data-theme="light"] .record button, :root[data-theme="light"] #settings-dialog select { background: #fff; color: #2d435d; border-color: #cbd6e4; }
+:root[data-theme="light"] dialog hr { border-color: #d6e0ed; }
+@media(max-height: 760px) { .account-card { display: none; } }

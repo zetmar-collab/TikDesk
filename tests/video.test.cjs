@@ -13,6 +13,7 @@ function player(src, top = 0, paused = false, id = '') {
 }
 function inspect(videos, metadata = null) {
   return vm.runInNewContext(VIDEO_SCRIPT, {
+    URL,
     document: { querySelectorAll: () => videos, querySelector: () => metadata ? { textContent: JSON.stringify(metadata) } : null },
     innerWidth: 420, innerHeight: 744,
     getComputedStyle: () => ({ visibility: 'visible', display: 'block', opacity: '1' }),
@@ -63,4 +64,15 @@ test('React alternate branch cannot return an old video after scrolling', () => 
     alternate: { memoizedProps: { url: 'https://v.tiktokcdn.com/current.mp4' } }
   };
   assert.equal(inspect([video]).url, 'https://v.tiktokcdn.com/current.mp4');
+});
+test('Copies the canonical video link without tracking parameters', () => {
+  const video = player('https://v.tiktokcdn.com/current.mp4', 0, false, '123456789');
+  video.closest = () => ({ querySelector: () => ({ href: 'https://www.tiktok.com/@test/video/123456789?tracking=1' }) });
+  assert.equal(inspect([video]).pageUrl, 'https://www.tiktok.com/@test/video/123456789');
+});
+test('Builds a mobile feed permalink from the selected player ID and profile anchor', () => {
+  const video = player('blob:https://www.tiktok.com/current');
+  video.closest = () => ({ querySelector: () => null, querySelectorAll: () => [{ href: 'https://www.tiktok.com/@test' }] });
+  video.__reactFiberTest = { memoizedProps: { url: 'https://v.tiktokcdn.com/a.mp4', teaParams: { group_id: '123456789' } } };
+  assert.equal(inspect([video]).pageUrl, 'https://www.tiktok.com/@test/video/123456789');
 });

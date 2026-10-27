@@ -17,11 +17,21 @@ function inspectPlayingVideo() {
   }).filter(item => item.area > 2500).sort((a, b) => b.score - a.score);
   if (!visible.length) return { error: 'Brak widocznego filmu. Otwórz film i rozpocznij odtwarzanie.' };
   const video = visible[0].video;
-  const container = video.closest('article, [data-e2e="recommend-list-item-container"], [data-e2e="feed-item"]');
+  const container = video.closest('article, [data-e2e="recommend-list-item-container"], [data-e2e="feed-item"], [data-e2e="video-slide-active"], .swiper-slide');
   const link = container?.querySelector('a[href*="/video/"]')?.href || '';
   let id = link.match(/\/video\/(\d+)/)?.[1] || (visible.length === 1 ? location.pathname.match(/\/video\/(\d+)/)?.[1] : '') || '';
   const source = video.currentSrc || video.src || video.querySelector('source')?.src || '';
-  if (source.startsWith('https://')) return { url: source, id, source: 'video' };
+  let profilePath = '';
+  for (const anchor of container?.querySelectorAll?.('a[href*="/@"]') || []) {
+    try { const url = new URL(anchor.href, 'https://www.tiktok.com'); if (/^\/@[^/]+\/?$/.test(url.pathname) && (url.hostname === 'tiktok.com' || url.hostname.endsWith('.tiktok.com'))) { profilePath = url.pathname.replace(/\/$/, ''); break; } } catch {}
+  }
+  const result = (url, kind) => {
+    let pageUrl = '';
+    if (id && link.includes(`/video/${id}`)) pageUrl = link.split('?')[0].split('#')[0];
+    else if (id && profilePath) pageUrl = `https://www.tiktok.com${profilePath}/video/${id}`;
+    else if (id && location.pathname.includes(`/video/${id}`)) pageUrl = `https://www.tiktok.com${location.pathname}`;
+    return { url, id, pageUrl, source: kind };
+  };
   // TikTok's MediaSource player keeps the original MP4 address in the props of
   // this video's own React ancestors. Do not traverse siblings or feed lists.
   let element = video;
@@ -49,8 +59,10 @@ function inspectPlayingVideo() {
       }
     }
     const urls = [...new Set([...addresses, ...downloads])];
-    if (urls.length) return { url: urls[0], id, source: 'player' };
+    if (source.startsWith('https://')) return result(source, 'video');
+    if (urls.length) return result(urls[0], 'player');
   }
+  if (source.startsWith('https://')) return result(source, 'video');
   // Some players expose a MediaSource blob. Only use embedded metadata when its
   // item ID is known to match this exact visible feed item.
   if (id) {
@@ -65,13 +77,13 @@ function inspectPlayingVideo() {
       if (!item || typeof item !== 'object') continue;
       if (String(item.id || '') === id && item.video) {
         for (const address of [item.video.playAddr, item.video.downloadAddr]) {
-          if (typeof address === 'string' && address.startsWith('https://')) return { url: address, id, source: 'metadata' };
+          if (typeof address === 'string' && address.startsWith('https://')) return result(address, 'metadata');
         }
       }
       queue.push(...Object.values(item).filter(value => value && typeof value === 'object'));
     }
   }
-  return { error: 'Ten film nie udostępnia bezpośredniego pliku do pobrania. Spróbuj w drugim trybie widoku lub wybierz inny film.' };
+  return { ...result('', ''), error: 'Ten film nie udostępnia bezpośredniego pliku do pobrania. Spróbuj w drugim trybie widoku lub wybierz inny film.' };
 }
 
 const VIDEO_SCRIPT = `(${inspectPlayingVideo.toString()})()`;
