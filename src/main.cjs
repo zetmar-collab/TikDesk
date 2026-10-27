@@ -364,7 +364,9 @@ async function createWindow() {
   if (smoke && process.argv.includes('--preferences-read')) {
     const [width, height] = win.getSize();
     const cookies = await tikSession.cookies.get({ url: HOME, name: 'tiktok_webapp_theme' });
-    if (preferences.theme !== 'light' || preferences.mode !== 'desktop' || !wc.isAudioMuted() || width !== 1040 || height !== 760 || cookies[0]?.value !== 'light') throw new Error('Ustawienia nie przetrwały restartu aplikacji.');
+    const expectedWidth = Math.min(1040, Math.max(800, area.width));
+    const expectedHeight = Math.min(760, Math.max(640, area.height));
+    if (preferences.theme !== 'light' || preferences.mode !== 'desktop' || !wc.isAudioMuted() || width !== expectedWidth || height !== expectedHeight || cookies[0]?.value !== 'light') throw new Error('Ustawienia nie przetrwały restartu aplikacji.');
     if (preferences.startup !== 'last' || preferences.downloadDirectory !== path.join(app.getPath('temp'), 'TikDeskSavedDownloads') || bookmarks[0]?.url !== `${HOME}@test`) throw new Error('Nowe ustawienia lub zakładki nie przetrwały restartu.');
     console.log('Preferences restart roundtrip passed.');
     wc.emit('before-mouse-event', {}, { type: 'mouseDown' });
