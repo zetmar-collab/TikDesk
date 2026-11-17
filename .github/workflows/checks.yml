@@ -26,7 +26,7 @@ jobs:
       - run: npm test
       - run: npm run test:preferences
       - run: npm run test:smoke
-      - run: npm run build
+      - run: npm run build -- --publish never
       - run: ./scripts/test-package.ps1 -Install
       - uses: actions/upload-artifact@v7.0.2
         if: always()
