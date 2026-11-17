@@ -4,6 +4,8 @@ Nieoficjalna aplikacja dla Windows 10/11 x64, otwierająca **stronę TikToka** w
 
 Bieżąca wersja: **1.4.0**, instalator `TikDesk-Setup-1.4.0.exe`.
 
+Bieżący audyt zależności ma tymczasowy, jawny wyjątek dotyczący niezałatanej biblioteki narzędzi budowania: [opis ekspozycji, ograniczenia i termin](docs/SECURITY-EXCEPTIONS.md). Wcześniejszy wynik 0 alertów nie opisuje aktualnej bazy advisory.
+
 [Pobierz instalator Windows 1.4.0](https://github.com/zetmar-collab/TikDesk/releases/download/v1.4.0/TikDesk-Setup-1.4.0.exe) · [Wszystkie wydania](https://github.com/zetmar-collab/TikDesk/releases)
 
 ## Instalacja i używanie

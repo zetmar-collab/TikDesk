@@ -2,6 +2,8 @@
 
 Data: 17 listopada 2026. Dokument opisuje wdrożenie wersji 1.4.0. Kod oraz instalator są udostępnione w repozytorium i wydaniu v1.4.0.
 
+Aktualizacja podczas publikacji: baza advisory ujawniła niezałatany problem picomatch w narzędziach budowania. Wcześniejsze wyniki npm audit poniżej są historyczne. Bieżący stan i ograniczony czasowo wyjątek opisano w [SECURITY-EXCEPTIONS.md](SECURITY-EXCEPTIONS.md).
+
 ## Poprawki
 
 | Audyt | Zmiana | Weryfikacja |
