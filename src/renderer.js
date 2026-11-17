@@ -2,7 +2,15 @@ const $ = (selector) => document.querySelector(selector);
 let toastTimer;
 let latestState;
 let settingsDirty = false;
+let shortcutsDirty = false;
 function toast(text) {
+  const dialog = [...document.querySelectorAll('dialog[open]')].at(-1);
+  if (dialog) {
+    let notice = dialog.querySelector('.dialog-notice');
+    if (!notice) { notice = document.createElement('p'); notice.className = 'dialog-notice'; notice.setAttribute('role', 'status'); dialog.append(notice); }
+    notice.textContent = text; notice.hidden = false; $('#toast').hidden = true;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { notice.hidden = true; }, 6000); return;
+  }
   $('#toast').textContent = text;
   $('#toast').hidden = false;
   clearTimeout(toastTimer);
@@ -41,16 +49,23 @@ window.tikdesk.onState((state) => {
   for (const button of document.querySelectorAll('.nav')) {
     const route = button.dataset.route;
     const pathname = new URL(state.url).pathname;
-    button.classList.toggle('active', route === 'home' ? pathname === '/' : route === 'live' ? pathname.startsWith('/live') : pathname.includes('/upload'));
+    button.classList.toggle('active', route === 'home' ? pathname === '/' : route === 'live' ? pathname.startsWith('/live') : route === 'login' ? /^\/(login|auth|passport)(\/|$)/.test(pathname) : pathname.includes('/upload'));
   }
   if (state.notice) toast(state.notice);
   $('#app-version').textContent = state.version || '';
+  $('#sidebar-version').textContent = state.version || '';
   if (!settingsDirty) $('#startup').value = state.startup || 'home';
   $('#download-directory').textContent = state.downloadDirectory || 'Domyślny folder Pobrane systemu Windows';
   $('#update-message').textContent = state.updateMessage || '';
   $('#open-releases').hidden = !state.updateAvailable;
   renderDownloads(state.downloads || [], downloading);
   renderBookmarks(state.bookmarks || []);
+  renderQueue(state.queue || { paused: true, rows: [] });
+  renderPermissions(state.permissions || []);
+  renderShortcuts(state.shortcuts || {});
+  for (const [id, label] of Object.entries({ back: 'Wstecz', forward: 'Dalej', home: 'Ekran główny', reload: 'Odśwież', fullscreen: 'Pełny ekran' })) $(`#${id}`).title = `${label} (${state.shortcuts?.[id] || 'bez skrótu'})`;
+  if (state.diagnosticReport) $('#diagnostics-report').value = state.diagnosticReport;
+  if (Number.isFinite(state.cacheBytes)) $('#cache-size').textContent = `Pamięć podręczna: ${(state.cacheBytes / 1024 ** 2).toFixed(1)} MB`;
 });
 for (const button of document.querySelectorAll('[data-route]')) button.addEventListener('click', (event) => { event.preventDefault(); command('navigate', button.dataset.route); });
 for (const name of ['back', 'forward', 'reload', 'mute', 'fullscreen', 'browser', 'reset']) $(`#${name}`).addEventListener('click', () => command(name));
@@ -69,9 +84,9 @@ async function showDialog(id) {
 }
 $('#help-open').addEventListener('click', () => showDialog('#help-dialog'));
 $('#address').addEventListener('click', () => { $('#link-error').textContent = ''; showDialog('#link-dialog'); });
-$('#downloads-open').addEventListener('click', () => showDialog('#downloads-dialog'));
+$('#downloads-open').addEventListener('click', () => { showDialog('#downloads-dialog'); command('libraries-refresh'); });
 $('#bookmarks-open').addEventListener('click', () => showDialog('#bookmarks-dialog'));
-$('#settings-open').addEventListener('click', () => { settingsDirty = false; $('#startup').value = latestState?.startup || 'home'; showDialog('#settings-dialog'); });
+$('#settings-open').addEventListener('click', () => { settingsDirty = false; shortcutsDirty = false; renderShortcuts(latestState?.shortcuts || {}); $('#startup').value = latestState?.startup || 'home'; showDialog('#settings-dialog'); });
 $('#startup').addEventListener('change', () => { settingsDirty = true; });
 $('#settings-save').addEventListener('click', async () => { if ((await command('settings-save', { startup: $('#startup').value })).ok) { settingsDirty = false; toast('Ustawienia zapisane.'); } });
 $('#directory-choose').addEventListener('click', () => command('download-directory'));
@@ -79,10 +94,17 @@ $('#bookmark-add').addEventListener('click', () => command('bookmark-add'));
 $('#updates-check').addEventListener('click', async () => { $('#updates-check').disabled = true; try { await command('check-updates'); } finally { $('#updates-check').disabled = false; } });
 $('#open-releases').addEventListener('click', () => command('open-releases'));
 for (const button of document.querySelectorAll('[data-close]')) button.addEventListener('click', () => $(`#${button.dataset.close}`).close());
-for (const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('close', () => command('dialog', false));
+for (const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('close', () => command('dialog', Boolean(document.querySelector('dialog[open]'))));
+for (const name of ['downloads-clear', 'queue-add', 'queue-start', 'queue-pause', 'bookmark-video', 'bookmark-import', 'bookmark-export', 'privacy-refresh', 'cache-clear', 'diagnostics-copy']) $(`#${name}`).addEventListener('click', () => command(name));
+$('#downloads-refresh').addEventListener('click', () => command('libraries-refresh'));
+$('#diagnostics-open').addEventListener('click', async () => { await command('diagnostics'); showDialog('#diagnostics-dialog'); });
+$('#shortcuts-save').addEventListener('click', async () => { const values = Object.fromEntries([...document.querySelectorAll('[data-shortcut]')].map(input => [input.dataset.shortcut, input.value])); if ((await command('shortcuts-save', values)).ok) shortcutsDirty = false; });
+$('#shortcuts-reset').addEventListener('click', async () => { shortcutsDirty = false; await command('shortcuts-reset'); });
+for (const id of ['downloads-search', 'downloads-filter', 'downloads-sort']) $(`#${id}`).addEventListener('input', () => { if (latestState) renderDownloads(latestState.downloads || [], Boolean(latestState.download)); });
+for (const id of ['bookmarks-search', 'bookmarks-sort']) $(`#${id}`).addEventListener('input', () => { if (latestState) renderBookmarks(latestState.bookmarks || []); });
 $('#link-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const result = await window.tikdesk.command('open-link', $('#link-input').value);
+  const result = await command('open-link', $('#link-input').value);
   if (result.ok) $('#link-dialog').close();
   else $('#link-error').textContent = result.error;
 });
@@ -98,9 +120,12 @@ function action(label, name, id, closeId) {
   return button;
 }
 function renderDownloads(rows, busy) {
+  const query = $('#downloads-search').value.toLocaleLowerCase('pl'); const filter = $('#downloads-filter').value; const sort = $('#downloads-sort').value;
+  rows = rows.filter(row => `${row.filename} ${row.pageUrl}`.toLocaleLowerCase('pl').includes(query) && (filter === 'all' || (filter === 'missing' ? row.missing : row.status === filter)));
+  rows = [...rows].sort((a, b) => sort === 'name' ? a.filename.localeCompare(b.filename, 'pl') : (sort === 'oldest' ? 1 : -1) * String(a.createdAt).localeCompare(String(b.createdAt)));
   const list = $('#downloads-list');
   const existing = new Map([...list.querySelectorAll('.record')].map(element => [element.dataset.id, element]));
-  if (!rows.length) { list.textContent = 'Nie masz jeszcze pobranych filmów.'; return; }
+  if (!rows.length) { list.textContent = 'Brak pasujących pobrań.'; return; }
   if (!existing.size) list.replaceChildren();
   const labels = { connecting: 'Łączenie z serwerem', saving: 'Pobieranie', validating: 'Sprawdzanie MP4', completed: 'Zapisano', failed: 'Nieudane', cancelled: 'Anulowano', interrupted: 'Przerwane' };
   for (const [index, row] of rows.entries()) {
@@ -112,21 +137,25 @@ function renderDownloads(rows, busy) {
       element.append(title, status, location, buttons); list.append(element);
     }
     element.children[0].textContent = row.filename;
-    element.children[1].textContent = `${labels[row.status] || row.status}${row.status === 'saving' && row.percent !== null ? ` · ${row.percent}%` : ''}${row.error ? ` · ${row.error}` : ''}`;
+    element.children[1].textContent = `${row.missing ? 'Brak pliku na dysku' : labels[row.status] || row.status}${row.status === 'saving' && row.percent !== null ? ` · ${row.percent}%` : ''}${row.error ? ` · ${row.error}` : ''}`;
     element.children[2].textContent = row.filePath;
     if (list.children[index] !== element) list.insertBefore(element, list.children[index] || null);
-    const signature = `${row.status}|${busy}`;
+    const signature = `${row.status}|${busy}|${row.missing}|${row.temporary}`;
     if (element.dataset.actions !== signature) {
       element.dataset.actions = signature;
       const buttons = element.children[3]; buttons.replaceChildren();
-      if (row.status === 'completed') buttons.append(action('Otwórz', 'download-open', row.id), action('Pokaż w folderze', 'download-folder', row.id));
+      if (row.status === 'completed' && !row.missing) buttons.append(action('Otwórz', 'download-open', row.id), action('Pokaż w folderze', 'download-folder', row.id));
       else if (['failed', 'cancelled', 'interrupted'].includes(row.status)) { const retry = action('Spróbuj ponownie', 'download-retry', row.id, '#downloads-dialog'); retry.disabled = busy; buttons.append(retry); }
+      if (!['connecting', 'saving', 'validating'].includes(row.status)) { buttons.append(action('Usuń wpis…', 'download-remove', row.id)); if (row.temporary) buttons.append(action('Usuń częściowy plik…', 'download-cleanup', row.id)); }
     }
     existing.delete(row.id);
   }
   for (const element of existing.values()) element.remove();
 }
 function renderBookmarks(rows) {
+  const query = $('#bookmarks-search').value.toLocaleLowerCase('pl');
+  rows = rows.filter(row => `${row.title} ${row.url}`.toLocaleLowerCase('pl').includes(query));
+  if ($('#bookmarks-sort').value === 'name') rows = [...rows].sort((a, b) => a.title.localeCompare(b.title, 'pl'));
   const list = $('#bookmarks-list');
   const signature = JSON.stringify(rows);
   if (list.dataset.signature === signature) return;
@@ -139,5 +168,36 @@ function renderBookmarks(rows) {
     const buttons = document.createElement('div'); buttons.className = 'record-actions';
     buttons.append(action('Otwórz', 'bookmark-open', row.id, '#bookmarks-dialog'), action('Usuń zakładkę', 'bookmark-remove', row.id));
     element.append(title, url, buttons); list.append(element);
+  }
+}
+
+function renderQueue(queue) {
+  $('#queue-status').textContent = `${queue.paused ? 'Wstrzymana' : 'Uruchomiona'} · oczekuje: ${queue.rows.filter(row => row.status === 'queued').length}`;
+  $('#queue-start').disabled = !queue.paused || Boolean(latestState?.download);
+  $('#queue-pause').disabled = queue.paused;
+  const list = $('#queue-list'); const signature = JSON.stringify(queue);
+  if (list.dataset.signature === signature) return; list.dataset.signature = signature; list.replaceChildren();
+  for (const row of queue.rows) {
+    const element = document.createElement('article'); element.className = 'record';
+    const title = document.createElement('strong'); title.textContent = row.filePath.split(/[\\/]/).pop();
+    const description = document.createElement('p'); description.textContent = `${({ queued: 'Oczekuje', running: 'W toku', completed: 'Zapisano', failed: 'Nieudane', cancelled: 'Anulowano' })[row.status] || row.status}${row.error ? ` · ${row.error}` : ''}`;
+    const buttons = document.createElement('div'); buttons.className = 'record-actions';
+    if (['queued', 'running'].includes(row.status)) buttons.append(action('Anuluj zadanie', 'queue-cancel', row.id));
+    if (row.status !== 'running') buttons.append(action('Usuń z kolejki', 'queue-remove', row.id));
+    element.append(title, description, buttons); list.append(element);
+  }
+}
+function renderPermissions(rows) {
+  const list = $('#permissions-list'); const signature = JSON.stringify(rows);
+  if (list.dataset.signature === signature) return; list.dataset.signature = signature; list.replaceChildren();
+  if (!rows.length) { list.textContent = 'Nie udzielono żadnych zgód w tej sesji.'; return; }
+  for (const row of rows) { const item = document.createElement('article'); item.className = 'record'; const description = document.createElement('p'); description.textContent = `${row.origin}: ${{ camera: 'Aparat', microphone: 'Mikrofon', notifications: 'Powiadomienia' }[row.kind]}`; item.append(description, action('Cofnij zgodę', 'permission-revoke', row.id)); list.append(item); }
+}
+function renderShortcuts(values) {
+  const container = $('#shortcuts-fields');
+  for (const [name, value] of Object.entries(values)) {
+    let input = container.querySelector(`[data-shortcut="${name}"]`);
+    if (!input) { const label = document.createElement('label'); label.textContent = ({ reload: 'Odśwież', fullscreen: 'Pełny ekran', back: 'Wstecz', forward: 'Dalej', home: 'Ekran główny' })[name]; input = document.createElement('input'); input.dataset.shortcut = name; input.maxLength = 100; input.addEventListener('input', () => { shortcutsDirty = true; }); label.append(input); container.append(label); }
+    if (!shortcutsDirty) input.value = value;
   }
 }

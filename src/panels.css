@@ -20,3 +20,11 @@ dialog h3 { font-size: 17px; margin-bottom: 8px; }
 :root[data-theme="light"] .secondary, :root[data-theme="light"] .record button, :root[data-theme="light"] #settings-dialog select { background: #fff; color: #2d435d; border-color: #cbd6e4; }
 :root[data-theme="light"] dialog hr { border-color: #d6e0ed; }
 @media(max-height: 760px) { .account-card { display: none; } }
+.library-toolbar { display: grid; grid-template-columns: minmax(0,1fr); gap: 8px; margin: 18px 0; }
+.library-toolbar select { min-height: 36px; border: 1px solid #3a4b5f; border-radius: 7px; background: #101620; color: #f4f6fc; padding: 8px; font: inherit; }
+.button-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 0; }
+textarea { width: 100%; resize: vertical; padding: 12px; border: 1px solid #3a4b5f; border-radius: 8px; background: #101620; color: #edf1f7; font: 11px Consolas, monospace; margin-bottom: 16px; }
+:root[data-theme="light"] textarea, :root[data-theme="light"] .library-toolbar select { background: #f3f6fa; color: #172a43; border-color: #cbd6e4; }
+#shortcuts-fields input { margin-top: 8px; }
+.dialog-notice { position: sticky; bottom: 0; padding: 12px; border: 1px solid #4d8c81; border-radius: 8px; background: #243c39; color: #c4f8ec !important; }
+@media(min-width: 650px) { .library-toolbar { grid-template-columns: minmax(0,1fr) auto; } .library-toolbar input { grid-column: 1 / -1; } }

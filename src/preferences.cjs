@@ -3,10 +3,12 @@ const DEFAULTS = Object.freeze({ mode: 'mobile', theme: 'dark', muted: false, wi
 function normalizePreferences(value) {
   const input = value && typeof value === 'object' ? value : {};
   const dimension = (value, min, fallback) => Number.isInteger(value) && value >= min && value <= 5000 ? value : fallback;
+  let shortcuts; try { shortcuts = require('./shortcuts.cjs').normalizeShortcuts(input.shortcuts); } catch { shortcuts = require('./shortcuts.cjs').normalizeShortcuts(); }
   return {
     mode: ['mobile', 'desktop'].includes(input.mode) ? input.mode : DEFAULTS.mode,
     theme: ['dark', 'light', 'system'].includes(input.theme) ? input.theme : DEFAULTS.theme,
     muted: typeof input.muted === 'boolean' ? input.muted : DEFAULTS.muted,
+    shortcuts,
     downloadDirectory: typeof input.downloadDirectory === 'string' && require('node:path').isAbsolute(input.downloadDirectory) ? input.downloadDirectory : '',
     startup: input.startup === 'last' ? 'last' : 'home',
     lastUrl: require('./policy.cjs').isTikTok(input.lastUrl) ? input.lastUrl : 'https://www.tiktok.com/',

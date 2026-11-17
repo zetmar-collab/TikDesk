@@ -2,6 +2,7 @@ name: Windows checks
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -11,7 +12,7 @@ permissions:
 jobs:
   test:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.1.0
@@ -19,6 +20,19 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm audit --audit-level=moderate
       - run: npm test
       - run: npm run test:preferences
       - run: npm run test:smoke
+      - run: npm run build
+      - run: ./scripts/test-package.ps1 -Install
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: windows-reports-and-installer
+          path: |
+            artifacts/*.json
+            dist/TikDesk-Setup-*.exe
+          retention-days: 7

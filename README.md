@@ -2,13 +2,15 @@
 
 Nieoficjalna aplikacja dla Windows 10/11 x64, otwierająca **stronę TikToka** w widoku telefonu lub w trybie WWW. Nie jest aplikacją Android/iOS i nie zapewnia wszystkich funkcji mobilnego TikToka.
 
-Bieżąca wersja: **1.3.0**, instalator: `TikDesk-Setup-1.3.0.exe`.
+Bieżąca wersja: **1.4.0**, instalator `TikDesk-Setup-1.4.0.exe`.
 
-[Pobierz instalator Windows 1.3.0](https://github.com/zetmar-collab/TikDesk/releases/download/v1.3.0/TikDesk-Setup-1.3.0.exe) · [Wszystkie wydania](https://github.com/zetmar-collab/TikDesk/releases)
+[Pobierz instalator Windows 1.4.0](https://github.com/zetmar-collab/TikDesk/releases/download/v1.4.0/TikDesk-Setup-1.4.0.exe) · [Wszystkie wydania](https://github.com/zetmar-collab/TikDesk/releases)
 
 ## Instalacja i używanie
 
-1. Pobierz instalator z wydania powyżej, uruchom `TikDesk-Setup-1.3.0.exe` i wybierz katalog instalacji. Instalacja jest dla bieżącego użytkownika i nie wymaga administratora.
+Przycisk logowania jest w stałej nawigacji i pozostaje widoczny w małym oknie. [Audyt kodu](docs/AUDYT-2026-11-17.md) · [Wdrożenie zaleceń i zakres testów](docs/WDROZENIE-1.4.0.md).
+
+1. Pobierz instalator z wydania powyżej, uruchom `TikDesk-Setup-1.4.0.exe` i wybierz katalog instalacji. Instalacja jest dla bieżącego użytkownika i nie wymaga administratora.
 2. Uruchom TikDesk ze skrótu na pulpicie lub menu Start.
 3. Kliknij **Zaloguj się**. Logowanie odbywa się na oficjalnej stronie `https://www.tiktok.com/login` wewnątrz aplikacji, w trybie WWW. Wybierz jedną z metod dostępnych na stronie, np. kod QR lub adres e-mail. TikDesk nie udostępnia własnego formularza hasła.
 4. Po zalogowaniu kliknij **Telefon**, aby wrócić do mobilnego rozmiaru i identyfikacji przeglądarki. Sesja pozostaje w tej samej partycji Chromium.
@@ -51,15 +53,19 @@ Jeśli TikTok w widoku telefonu wymusza instalację aplikacji, użyj **WWW**. Sa
 
 ## Rozwój
 
-Wymagane Node.js 22.12+ i npm (CI używa Node 24). Z katalogu projektu:
+Wymagane Node.js 22.19+ i npm (CI używa Node 24). Z katalogu projektu:
 
 ```powershell
 npm.cmd ci
 npm.cmd start
 npm.cmd test
+npm.cmd run lint
+npm.cmd run typecheck
+npm.cmd run test:preferences
 npm.cmd run test:smoke
 npm.cmd run test:smoke -- --live
 npm.cmd run build
+npm.cmd run test:package
 ```
 
 `npm ci` pobiera Electron. Build pobiera narzędzia NSIS; potrzebny jest internet. Opcjonalnie `powershell -File scripts/make-icon.ps1` odtwarza własną ikonę aplikacji bez znaków TikToka.
@@ -91,13 +97,18 @@ src/shortcuts.cjs   wspólne polecenia klawiaturowe
 src/updates.cjs     odczyt stabilnego wydania GitHub i porównanie wersji
 src/preferences.cjs walidacja ustawień i migracja poprzedniej wersji
 src/theme.cjs       motyw i pliki cookie preferencji wyglądu TikToka
+src/async.cjs       anulowanie i limity oczekiwania
+src/queue.cjs       trwała kolejka, pauza i anulowanie zadań
+src/library.cjs     walidacja i import/eksport zakładek
+src/permissions.cjs osobne zgody i ich cofanie
+src/diagnostics.cjs raport bez prywatnych treści wyjątków
 src/preload.cjs     wąski most IPC lokalnego interfejsu
 src/renderer.js     obsługa interfejsu
 src/index.html     polskie widoki i pomoc
 src/styles.css     styl interfejsu
 src/panels.css     biblioteki, ustawienia i responsywny panel boczny
 tests/             testy granic domen i layoutu
-scripts/           generator ikony
+scripts/           generator ikony, harness Electron i test paczki
 assets/            własna ikona
 artifacts/         raporty i zrzuty testów (generowane)
 dist/              instalator i aplikacja (generowane)
@@ -121,9 +132,9 @@ Ręczny odbiór na koncie: logowanie i ponowny start, feed i odtwarzanie z dźwi
 
 ### Pobieranie — szczegóły i test
 
-Rozpoznawanie filmu opiera się na widoczności odtwarzacza w oknie. W przypadku adresów `blob:` aplikacja odczytuje dane wyłącznie z komponentów React należących do wybranego odtwarzacza; nie wybiera losowego pliku z historii żądań ani innego filmu w feedzie. To zależy od aktualnej budowy strony TikToka i może wymagać aktualizacji po zmianach serwisu. Przycisk Pobierz wykorzystuje strumień HTTPS Node.js z User-Agent, Referer i cookies pobranymi wyłącznie dla docelowej domeny z sesji Chromium. Nie wyłącza weryfikacji TLS. Nie jest sprawdzony w środowisku wymagającym firmowego proxy systemowego.
+Rozpoznawanie filmu opiera się na widoczności odtwarzacza w oknie. Dla `blob:` odczytywane są dane wyłącznie komponentów React wybranego odtwarzacza; aktualizacja TikToka może wymagać dostosowania selektora. Transfer HTTPS Node.js przekazuje User-Agent, Referer i cookies wyłącznie docelowej domeny. Weryfikacja TLS pozostaje włączona. Wersja 1.4 uwzględnia pierwszą trasę proxy systemowego/PAC Chromium: DIRECT albo HTTP/HTTPS CONNECT. Nie omija błędu proxy cichym przejściem do DIRECT. SOCKS i logowanie do proxy pozostają nieobsługiwane. Test wyboru trasy nie zastępuje odbioru w sieci firmowej.
 
-Każdy adres i przekierowanie musi pozostać HTTPS w obsługiwanych domenach CDN TikToka. Limit na odpowiedź serwera to 30 sekund, a na kolejną porcję danych — 45 sekund; anulowanie przerywa połączenie. Film trafia do nowego katalogu tymczasowego obok wybranego pliku. Przed zastąpieniem pliku docelowego aplikacja sprawdza granice kontenerów ISO BMFF, `ftyp`, `moov`, `mdat` i ścieżkę `vide`. To kontrola struktury, a nie pełne dekodowanie wszystkich klatek. Błąd lub anulowanie usuwa plik tymczasowy i zachowuje wcześniejszy plik docelowy. Nie stosujemy zewnętrznych serwisów pobierania ani nie usuwamy znaków wodnych.
+Każdy adres i przekierowanie musi pozostać HTTPS w obsługiwanych domenach CDN TikToka. Limity: 30 sekund na odpowiedź, 45 sekund bez danych, 30 minut całego transferu i 2 GB. Przed zapisem sprawdzane jest wolne miejsce. Własny katalog `.tikdesk-<ID>` obok celu jest powiązany z historią zapisaną przed transferem. Walidator wymaga poprawnej hierarchii `moov/trak/mdia`, nagłówków ścieżki, opisu próbek wideo i niepustego `mdat`. Nie dekoduje wszystkich klatek. Dopiero zaakceptowany plik zastępuje cel; błąd/anulowanie zachowuje wcześniejszy plik. Nie stosujemy zewnętrznych serwisów ani usuwania znaków wodnych.
 
 `npm.cmd run test:smoke -- --live --download-live` dodatkowo pobiera aktualny film z TikToka do `artifacts/download-mobile.mp4` i sprawdza rozmiar oraz nagłówek MP4. Flaga `--desktop-live` wybiera widok WWW i plik `artifacts/download-desktop.mp4`. Te opcje działają w osobnym profilu testowym. Przypadki jednostkowe obejmują wybór aktywnego filmu, odtwarzacz poza ekranem, dopasowanie metadanych, gałąź React po przewinięciu oraz złośliwe domeny i nazwy plików.
 
@@ -136,3 +147,24 @@ Podpis Authenticode wymaga certyfikatu wydawcy. Domyślne wydanie pozostaje niep
 Dokumentacja techniczna: [WebContentsView](https://www.electronjs.org/docs/latest/api/web-contents-view), [emulacja urządzenia](https://www.electronjs.org/docs/latest/api/web-contents#contentsenabledeviceemulationparameters), [bezpieczeństwo Electron](https://www.electronjs.org/docs/latest/tutorial/security). Przykład funkcji mobilnej: [TikTok Mobile Effect Editor](https://effecthouse.tiktok.com/learn/guides/tutorials/mobile/mobile-effect-editor).
 
 TikDesk nie jest powiązany z TikTok ani ByteDance. Kod projektu objęty MIT; serwis, filmy i znaki TikToka nie są objęte tą licencją.
+
+## Funkcje wersji 1.4
+
+- **Biblioteki:** szukanie po nazwie/tytule/adresie, sortowanie, filtry statusów i brakujących plików. Sprawdź pliki odświeża stan po przeniesieniu pliku poza aplikacją. Usuń wpis i Wyczyść historię wymagają potwierdzenia; gotowe filmy pozostają na dysku. Historia ma do 100 pozycji; po zapełnieniu trzeba ją uporządkować.
+- **Odzyskiwanie:** po awarii nowe aktywne zadanie staje się przerwane. Można je ponowić lub potwierdzić usunięcie wyłącznie jego częściowego pliku. Program nie usuwa rekurencyjnie folderów. Starsze pliki tymczasowe bez zapisanego powiązania wymagają ręcznej identyfikacji.
+- **Kolejka:** w Pobranych filmach wybierz Dodaj oglądany film, wskaż cel i naciśnij Start. Kolejka otwiera strony materiałów i odświeża źródła po ID, więc zmienia oglądaną stronę. Pauza zatrzymuje kolejne zadania; aktywne można anulować osobno. Maksymalnie 50 wpisów, po restarcie oczekuje na Start. Cel istniejący w momencie wykonania wymaga potwierdzenia zastąpienia. Ponawiany jest cały film, bez wznawiania od ostatniego bajtu.
+- **Zakładki filmu:** Zapisz oglądany film zapamiętuje kanoniczny link do materiału także na feedzie. Dodaj obecną stronę nadal zapisuje profil/stronę.
+- **Import/eksport:** JSON `tikdesk-bookmarks`, wersja 1, do 1 MB i 100 pozycji. Import sprawdza całość, odrzuca adresy spoza TikToka i strony logowania, usuwa parametry URL oraz pokazuje liczbę nowych pozycji i duplikatów. Eksport zawiera tylko tytuły i publiczne adresy, bez sesji konta.
+- **Diagnostyka:** podgląd i kopiowanie wersji, liczników i do 30 zdarzeń z etapem/kodem. Bez treści wyjątków, cookies, adresów filmów i prywatnych ścieżek. Raport nie jest wysyłany automatycznie.
+- **Prywatność:** osobne zgody na aparat/mikrofon, lista i cofanie zgód bieżącej sesji. Cofnięcie odświeża stronę i zatrzymuje urządzenia. Pomiar i czyszczenie cache zachowują logowanie. Reset sesji wstrzymuje kolejkę i anuluje aktywne pobieranie.
+- **Skróty:** edycja w Ustawieniach; np. Ctrl+Shift+R, kilka pozycji po przecinku, puste pole wyłącza polecenie. Konflikty i zarezerwowane skróty edycji są odrzucane. Można przywrócić domyślne.
+
+Nowe pole `shortcuts` w `preferences.json` i osobny `queue.json` nie wymagają migracji bazy danych. Dotychczasowe ustawienia i biblioteki są zachowane; nowe pola otrzymują wartości domyślne. Zgody i diagnostyka pozostają tylko w pamięci.
+
+Pełny harness testów Electron przeniesiono do `scripts/smoke.cjs`, poza paczkę produkcyjną. `--queue-live` razem z `--live --download-live` sprawdza rzeczywiste zadanie kolejki. Smoke mierzy także chwilową próbkę CPU/RAM; nie jest to benchmark ani gwarancja na innym komputerze.
+
+Lint obejmuje źródła, skrypty JS i testy. Typecheck jest stopniowy: obecnie kontrakty `async.cjs` i `diagnostics.cjs` przez JSDoc/checkJs, nie całe źródła. Override minimatch obejmuje wyłącznie podatne wersje 7–11.0.0; stare wersje główne z innym API nie są zamieniane.
+
+Testy obejmują również wymuszoną awarię osobnego procesu, odzyskiwanie częściowego pliku, limity, import, diagnostykę, zgody, skróty, proxy i kolejkę. `test:package` uruchamia zbudowane EXE w odrębnym profilu i sprawdza start UI, IPC oraz izolację. Nie wykonuje pełnego harnessu deweloperskiego. CI rozszerzono o budowanie NSIS, instalację/deinstalację na jednorazowym runnerze i raporty. Tryb instalacyjny skryptu odmawia pracy na zwykłym komputerze; lokalne przygotowanie workflow nie oznacza jego wykonania na GitHubie.
+
+Ręczny odbiór z kontem, prawdziwymi urządzeniami, siecią firmową i aktualizacją z poprzedniego instalatora pozostaje potrzebny. Sam udany test feedu nie potwierdza wszystkich tych scenariuszy. Publikacja nowego kodu i instalatora jest osobną operacją.

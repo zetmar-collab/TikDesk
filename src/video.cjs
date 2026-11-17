@@ -72,15 +72,19 @@ function inspectPlayingVideo() {
       if (text && text.length < 20_000_000) { try { queue.push(JSON.parse(text)); } catch {} }
     }
     let visited = 0;
-    while (queue.length && visited++ < 30000) {
-      const item = queue.shift();
+    while (visited < queue.length && visited < 30000) {
+      const item = queue[visited++];
       if (!item || typeof item !== 'object') continue;
       if (String(item.id || '') === id && item.video) {
         for (const address of [item.video.playAddr, item.video.downloadAddr]) {
           if (typeof address === 'string' && address.startsWith('https://')) return result(address, 'metadata');
         }
       }
-      queue.push(...Object.values(item).filter(value => value && typeof value === 'object'));
+      for (const key in item) {
+        if (queue.length >= 30000) break;
+        const value = item[key];
+        if (Object.hasOwn(item, key) && value && typeof value === 'object') queue.push(value);
+      }
     }
   }
   return { ...result('', ''), error: 'Ten film nie udostępnia bezpośredniego pliku do pobrania. Spróbuj w drugim trybie widoku lub wybierz inny film.' };

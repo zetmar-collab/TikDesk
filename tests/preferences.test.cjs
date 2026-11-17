@@ -11,7 +11,7 @@ test('Migrates version 1.1 settings without losing the selected viewport', () =>
 });
 test('Theme, mute and window state survive JSON serialization', () => {
   const input = { mode: 'desktop', theme: 'light', muted: true, window: { width: 1000, height: 700, maximized: true } };
-  assert.deepEqual(normalizePreferences(JSON.parse(JSON.stringify(input))), { ...input, downloadDirectory: '', startup: 'home', lastUrl: 'https://www.tiktok.com/' });
+  assert.deepEqual(normalizePreferences(JSON.parse(JSON.stringify(input))), { ...input, shortcuts: require('../src/shortcuts.cjs').normalizeShortcuts(), downloadDirectory: '', startup: 'home', lastUrl: 'https://www.tiktok.com/' });
 });
 test('Invalid or corrupt settings cannot create unusable window dimensions', () => {
   for (const input of [null, [], { mode: 'wrong', theme: 'wrong', muted: 'false', window: { width: -2, height: 1e20 } }]) {

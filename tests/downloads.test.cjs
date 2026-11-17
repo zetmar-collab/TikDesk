@@ -9,7 +9,9 @@ function box(type, body = Buffer.alloc(0)) {
   const header = Buffer.alloc(8); header.writeUInt32BE(body.length + 8); header.write(type, 4);
   return Buffer.concat([header, body]);
 }
-const video = Buffer.concat([box('ftyp', Buffer.from('isom\0\0\0\0isom')), box('moov', box('trak', box('mdia', box('hdlr', Buffer.concat([Buffer.alloc(8), Buffer.from('vide')]))))), box('mdat', Buffer.from('test-video-data'))]);
+const sample = Buffer.alloc(78); sample.writeUInt16BE(400, 24); sample.writeUInt16BE(700, 26);
+const descriptions = Buffer.alloc(8); descriptions.writeUInt32BE(1,4);
+const video = Buffer.concat([box('ftyp', Buffer.from('isom\0\0\0\0isom')), box('moov', box('trak', Buffer.concat([box('tkhd', Buffer.alloc(84)), box('mdia', Buffer.concat([box('mdhd', Buffer.alloc(24)), box('hdlr', Buffer.concat([Buffer.alloc(8), Buffer.from('vide'), Buffer.alloc(12)])), box('minf', box('stbl', box('stsd', Buffer.concat([descriptions,box('avc1',sample)]))))]))]))), box('mdat', Buffer.from('test-video-data'))]);
 async function fixture(t, fetch, options = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tikdesk-unit-'));
   const filePath = path.join(dir, 'film.mp4');
@@ -80,4 +82,22 @@ test('History restores failure reasons and never persists signed media URLs', as
   assert.equal(restored.list()[0].error, row.error);
   restored.restore([{ ...row, filePath: '../bad.exe' }]);
   assert.deepEqual(restored.list(), []);
+});
+test('A malformed MP4 cannot overwrite a previous file even with a root-level video handler', async t => {
+  const malformed = Buffer.concat([box('ftyp'), box('moov'), box('mdat'), box('hdlr', Buffer.concat([Buffer.alloc(8), Buffer.from('vide')]))]);
+  const { manager, filePath, args } = await fixture(t, async () => new Response(malformed, { headers: { 'content-type': 'video/mp4' } }));
+  await fs.writeFile(filePath, 'original'); assert.equal((await manager.start(args)).status, 'failed'); assert.equal(await fs.readFile(filePath, 'utf8'), 'original');
+});
+test('History is durable before connecting and a storage failure prevents a network request', async t => {
+  let saved = false; let requests = 0;
+  const f = await fixture(t, async () => { requests++; assert.equal(saved, true); return new Response(video, { headers: { 'content-type': 'video/mp4' } }); }, { persist: async () => { saved = true; } });
+  assert.equal((await f.manager.start(f.args)).status, 'completed'); assert.equal(requests, 1);
+  const bad = await fixture(t, async () => { throw new Error('must not fetch'); }, { persist: async () => { throw new Error('disk full'); } });
+  assert.equal((await bad.manager.start(bad.args)).status, 'failed'); await assert.rejects(fs.access(bad.filePath));
+});
+test('Transfers reject oversized files and cannot stream indefinitely', async t => {
+  const size = await fixture(t, async () => new Response(video, { headers: { 'content-type': 'video/mp4' } }), { maxBytes: 10 });
+  assert.equal((await size.manager.start(size.args)).status, 'failed'); await assert.rejects(fs.access(size.filePath));
+  const f = await fixture(t, async (_url, { signal }) => new Response(new ReadableStream({ start(controller) { const timer = setInterval(() => controller.enqueue(Buffer.from('x')), 2); signal.addEventListener('abort', () => { clearInterval(timer); controller.error(signal.reason); }); } }), { headers: { 'content-type': 'video/mp4' } }), { totalMs: 20 });
+  assert.equal((await f.manager.start(f.args)).status, 'failed');
 });

@@ -1,0 +1,12 @@
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const project = path.join(__dirname, '..');
+const executable = process.argv[2] || path.join(project, 'dist/win-unpacked/TikDesk.exe');
+const started = Date.now();
+const run = spawnSync(executable, ['--smoke-test', `--smoke-profile=package-${process.pid}`], { cwd: project, windowsHide: true, timeout: 20000, stdio: 'inherit' });
+if (run.error) throw run.error;
+if (run.status !== 0) throw new Error(`Packaged application exited with ${run.status}`);
+const reportPath = path.join(project, 'artifacts/package-smoke.json');
+if (fs.statSync(reportPath).mtimeMs < started - 1000 || !JSON.parse(fs.readFileSync(reportPath, 'utf8')).passed) throw new Error('No fresh successful package report');
+console.log('Packaged application checks passed.');

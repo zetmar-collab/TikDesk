@@ -76,3 +76,6 @@ test('Builds a mobile feed permalink from the selected player ID and profile anc
   video.__reactFiberTest = { memoizedProps: { url: 'https://v.tiktokcdn.com/a.mp4', teaParams: { group_id: '123456789' } } };
   assert.equal(inspect([video]).pageUrl, 'https://www.tiktok.com/@test/video/123456789');
 });
+test('Wide metadata stays within a bounded queue rather than overflowing function arguments', () => {
+  assert.doesNotThrow(() => inspect([player('blob:https://www.tiktok.com/current', 0, false, '123456789')], { items: Array.from({ length: 200000 }, () => ({})) }));
+});

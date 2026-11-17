@@ -1,0 +1,22 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { fork } = require('node:child_process');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { DownloadManager } = require('../src/downloads.cjs');
+test('A forced process exit preserves a recoverable record and cleanup touches only its partial file', { timeout: 10000 }, async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tikdesk-crash-test-'));
+  const child = fork(path.join(__dirname, 'fixtures/crash-download.cjs'), [directory], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  t.after(() => { child.kill(); });
+  await new Promise((resolve, reject) => { child.once('message', resolve); child.once('error', reject); child.once('exit', code => { if (code) reject(new Error(`fixture ${code}`)); }); });
+  await new Promise(resolve => { child.once('exit', resolve); child.kill(); });
+  const rows = JSON.parse(await fs.readFile(path.join(directory, 'history.json'), 'utf8'));
+  const manager = new DownloadManager({ fetch }); manager.restore(rows);
+  assert.equal(manager.list()[0].status, 'interrupted'); assert.ok(manager.list()[0].temporary);
+  await fs.writeFile(path.join(directory, 'keep.mp4'), 'keep');
+  await manager.cleanup(manager.list()[0].id);
+  assert.deepEqual((await fs.readdir(directory)).sort(), ['history.json', 'keep.mp4']);
+  assert.equal(await fs.readFile(path.join(directory, 'keep.mp4'), 'utf8'), 'keep');
+  await fs.unlink(path.join(directory, 'keep.mp4')); await fs.unlink(path.join(directory, 'history.json')); await fs.rmdir(directory);
+});

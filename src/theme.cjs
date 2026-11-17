@@ -10,7 +10,8 @@ function themeCookies(theme, preference = 'system') {
 }
 function themeCookieValue(cookies, name, domain) {
   const matches = cookies.filter(cookie => cookie.name === name);
-  return (matches.find(cookie => domain && cookie.domain === domain) || matches.find(cookie => cookie.domain === 'www.tiktok.com') || matches[0])?.value;
+  const normalized = value => value?.replace(/^\./, '');
+  return (matches.find(cookie => domain && normalized(cookie.domain) === normalized(domain)) || matches.find(cookie => normalized(cookie.domain) === 'www.tiktok.com') || matches[0])?.value;
 }
 function siteThemePreference(source, theme) {
   if (source === 'auto') return 'system';

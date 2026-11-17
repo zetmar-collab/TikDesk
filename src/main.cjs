@@ -8,9 +8,18 @@ const { isMediaUrl, VIDEO_SCRIPT, videoFilename } = require('./video.cjs');
 const { normalizePreferences } = require('./preferences.cjs');
 const { resolvedTheme, themeCookies, themeCookieValue, siteThemePreference } = require('./theme.cjs');
 const { DownloadManager } = require('./downloads.cjs');
-const { shortcutCommand } = require('./shortcuts.cjs');
+const { shortcutCommand, normalizeShortcuts } = require('./shortcuts.cjs');
 const { checkUpdates } = require('./updates.cjs');
-const { sessionFetch } = require('./network.cjs');
+const { sessionFetch, closeNetwork } = require('./network.cjs');
+const { bounded } = require('./async.cjs');
+const { DownloadQueue } = require('./queue.cjs');
+const { bookmarkUrl, importBookmarks, exportBookmarks } = require('./library.cjs');
+const { Diagnostics } = require('./diagnostics.cjs');
+const { Permissions, kinds } = require('./permissions.cjs');
+const diagnostics = new Diagnostics();
+const permissions = new Permissions();
+let queue;
+let addingToQueue = false;
 
 const smoke = process.argv.includes('--smoke-test');
 const profileArg = process.argv.find(argument => argument.startsWith('--smoke-profile='))?.split('=')[1];
@@ -21,7 +30,6 @@ let win, view, tikSession;
 let preferences = normalizePreferences();
 let state = { mode: 'mobile', loading: true, error: '', url: HOME, canGoBack: false, canGoForward: false, muted: false };
 const popups = new Set();
-const grants = new Set();
 let modalOpen = false;
 let remoteReady = false;
 let downloads;
@@ -43,7 +51,7 @@ let themeInteractionUntil = 0;
 let quitting = false;
 
 function broadcast(update = {}) {
-  state = { ...state, ...update, version: app.getVersion(), theme: preferences.theme, effectiveTheme: resolvedTheme(preferences.theme, nativeTheme.shouldUseDarkColors), downloads: downloads?.list() || [], bookmarks, downloadDirectory: preferences.downloadDirectory, startup: preferences.startup };
+  state = { ...state, ...update, version: app.getVersion(), theme: preferences.theme, effectiveTheme: resolvedTheme(preferences.theme, nativeTheme.shouldUseDarkColors), downloads: downloads?.list() || [], queue: queue?.snapshot() || { paused: true, rows: [] }, permissions: permissions.list(), shortcuts: preferences.shortcuts, bookmarks, downloadDirectory: preferences.downloadDirectory, startup: preferences.startup };
   if (view?.webContents && !view.webContents.isDestroyed()) {
     const wc = view.webContents;
     state.url = wc.getURL() || HOME;
@@ -88,7 +96,7 @@ async function adoptTikTokTheme(domain) {
   }
 }
 function savePreferences() {
-  return saveJson('preferences.json', preferences);
+  return saveJson('preferences.json', preferences).catch(error => { diagnostics.record('storage', error); broadcast({ notice: 'Nie udało się zapisać ustawień. Sprawdź wolne miejsce i uprawnienia do profilu.' }); throw error; });
 }
 function saveJson(name, value) {
   const contents = JSON.stringify(value);
@@ -104,7 +112,7 @@ function restoreView() {
 }
 function attachShortcuts(contents, popup = false) {
   contents.on('before-input-event', (event, input) => {
-    const command = shortcutCommand(input);
+    const command = shortcutCommand(input, preferences.shortcuts);
     if (!command) return;
     event.preventDefault();
     if (popup && command === 'reload') { contents.reload(); return; }
@@ -198,16 +206,18 @@ function configureSession() {
       } catch (error) { console.error('Theme persistence:', error.message); }
     }, 250);
   });
-  tikSession.setPermissionCheckHandler((_wc, permission, origin) => isTikTok(origin) && grants.has(`${new URL(origin).origin}|${permission}`));
+  tikSession.setPermissionCheckHandler((_wc, permission, origin, details) => permission === 'fullscreen' ? isTikTok(origin) : permissions.allows(origin, permission, details));
   tikSession.setPermissionRequestHandler(async (wc, permission, callback, details) => {
-    const origin = details.requestingUrl || wc.getURL();
+    const origin = details.requestingUrl || wc?.getURL() || '';
     if (!isTikTok(origin) || !['media', 'notifications', 'fullscreen'].includes(permission)) return callback(false);
     if (permission === 'fullscreen') return callback(true);
     if (smoke || !win || win.isDestroyed()) return callback(false);
-    const label = permission === 'media' ? 'aparatu i/lub mikrofonu' : 'powiadomień';
+    const label = kinds(permission, details).map(kind => ({ camera: 'aparatu', microphone: 'mikrofonu', notifications: 'powiadomień' })[kind]).join(' i ');
+    if (!label) return callback(false);
     try {
       const { response } = await dialog.showMessageBox(win, { type: 'question', title: 'Uprawnienia TikToka', message: `Zezwolić ${new URL(origin).hostname} na dostęp do ${label}?`, buttons: ['Nie zezwalaj', 'Zezwól w tej sesji'], defaultId: 0, cancelId: 0 });
-      if (response === 1) grants.add(`${new URL(origin).origin}|${permission}`);
+      if (response === 1) permissions.grant(origin, permission, details);
+      broadcast();
       callback(response === 1);
     } catch { callback(false); }
   });
@@ -221,15 +231,18 @@ function configureSession() {
     });
   });
 }
-async function downloadVideo(testPath, expectedId) {
+async function downloadVideo(testPath, expectedId, parentSignal) {
   if (preparingDownload || downloads.active) throw new Error('Pobieranie jest już w toku.');
   const wc = view.webContents;
   if (!isTikTok(wc.getURL()) && !smoke) throw new Error('Otwórz film na stronie TikToka.');
   preparingDownload = true;
   preparingController = new AbortController();
+  const cancelPreparation = () => { preparingController?.abort(parentSignal.reason); downloads.cancel(); };
+  parentSignal?.addEventListener('abort', cancelPreparation, { once: true });
+  if (parentSignal?.aborted) cancelPreparation();
   broadcast({ download: { phase: 'preparing', percent: null }, downloadMessage: 'Przygotowywanie pobierania…' });
   try {
-    const video = await wc.executeJavaScript(VIDEO_SCRIPT);
+    const video = await inspectVideo(preparingController.signal);
     preparingController.signal.throwIfAborted();
     if (video.error) throw new Error(video.error);
     if (expectedId && video.id !== expectedId) throw new Error('To inny film. Otwórz właściwy materiał i spróbuj ponownie.');
@@ -247,22 +260,64 @@ async function downloadVideo(testPath, expectedId) {
     preparingController.signal.throwIfAborted();
     const result = await downloads.start({ url: video.url, filePath: file, pageUrl: sourcePage, videoId: video.id, userAgent: wc.getUserAgent() });
     lastVideoDownload = { status: result.status, bytes: result.bytes, error: result.error };
-    const message = result.status === 'completed' ? 'Film zapisany na dysku.' : result.error;
+    const message = result.status === 'completed' ? result.error || 'Film zapisany na dysku.' : result.error;
     broadcast({ download: null, downloadMessage: message, notice: message });
+    if (result.status !== 'completed') diagnostics.record('download', new Error(result.error));
+    return result;
   } catch (error) {
+    diagnostics.record('download', error);
     broadcast({ download: null, downloadMessage: error.message });
     throw error;
-  } finally { preparingDownload = false; preparingController = null; }
+  } finally { parentSignal?.removeEventListener('abort', cancelPreparation); preparingDownload = false; preparingController = null; }
+}
+
+async function inspectVideo(signal) {
+  const wc = view.webContents;
+  try { return await bounded(wc.executeJavaScript(VIDEO_SCRIPT), { signal, timeoutMs: 8000, message: 'Odtwarzacz nie odpowiada. Odśwież stronę i spróbuj ponownie.' }); }
+  catch (error) {
+    if (error.code === 'TIMEOUT' && !wc.isDestroyed()) wc.forcefullyCrashRenderer();
+    throw error;
+  }
+}
+
+async function confirm(message, detail) {
+  if (smoke) return false;
+  const { response } = await dialog.showMessageBox(win, { type: 'question', title: 'TikDesk', message, detail, buttons: ['Anuluj', 'Potwierdź'], defaultId: 0, cancelId: 0 });
+  return response === 1;
+}
+async function addToQueue() {
+  if (addingToQueue) throw new Error('Wybierz najpierw plik dla poprzedniego zadania.');
+  addingToQueue = true;
+  try {
+    const video = await inspectVideo();
+    if (!video.id || !isTikTok(video.pageUrl) || !isMediaUrl(video.url)) throw new Error('Otwórz szczegóły filmu, aby dodać go do kolejki.');
+    const result = await dialog.showSaveDialog(win, { title: 'Dodaj film do kolejki', defaultPath: path.join(preferences.downloadDirectory || app.getPath('downloads'), videoFilename(video.id)), filters: [{ name: 'Film MP4', extensions: ['mp4'] }], properties: ['showOverwriteConfirmation', 'createDirectory'] });
+    if (result.filePath) { await queue.add({ videoId: video.id, pageUrl: video.pageUrl, filePath: result.filePath }); broadcast({ notice: 'Film dodany do kolejki. Uruchom ją w panelu Pobrane filmy.' }); }
+  } finally { addingToQueue = false; }
+}
+async function runQueuedDownload(row, signal) {
+  if (preparingDownload || downloads.active) throw new Error('Inne pobieranie jest w toku.');
+  signal.throwIfAborted();
+  if (await fs.stat(row.filePath).catch(() => null)) if (!(await confirm('Zastąpić istniejący plik?', path.basename(row.filePath)))) throw new Error('Nie zastąpiono istniejącego pliku.');
+  await bounded(navigate(row.pageUrl), { signal, timeoutMs: 30000 });
+  const deadline = Date.now() + 10000;
+  do {
+    signal.throwIfAborted(); const video = await inspectVideo(signal);
+    if (video.id === row.videoId && isMediaUrl(video.url)) return downloadVideo(row.filePath, row.videoId, signal);
+    await bounded(new Promise(resolve => setTimeout(resolve, 200)), { signal });
+  } while (Date.now() < deadline);
+  throw new Error('Nie znaleziono właściwego filmu. Spróbuj ponownie z jego strony.');
 }
 
 async function navigate(url) {
   if (!isTikTok(url)) throw new Error('Wklej adres HTTPS z domeny tiktok.com.');
   broadcast({ error: '', loading: true });
   view.setVisible(!modalOpen);
-  try { await view.webContents.loadURL(url); }
+  try { await bounded(view.webContents.loadURL(url), { timeoutMs: 30000, message: 'Strona nie odpowiedziała w ciągu 30 sekund.' }); }
   catch (error) { if (!error.message.includes('ERR_ABORTED')) failed(error.message); }
 }
 function failed(message) {
+  diagnostics.record('navigation', new Error(message));
   if (!view || view.webContents.isDestroyed()) return;
   view.setVisible(false);
   broadcast({ loading: false, error: `Nie udało się otworzyć TikToka. Sprawdź połączenie i spróbuj ponownie. ${message}` });
@@ -291,6 +346,9 @@ async function createWindow() {
     onChange: (_rows, active) => broadcast({ download: active ? { phase: active.status, percent: active.percent } : preparingDownload ? { phase: 'validating', percent: null } : null })
   });
   downloads.restore(await readJson('downloads.json'));
+  await downloads.refreshFiles();
+  queue = new DownloadQueue({ run: runQueuedDownload, cancel: () => { preparingController?.abort(new Error('Zadanie anulowane.')); downloads.cancel(); }, persist: rows => saveJson('queue.json', rows), onChange: () => broadcast() });
+  queue.restore(await readJson('queue.json'));
   const area = screen.getPrimaryDisplay().workAreaSize;
   win = new BrowserWindow({ width: Math.min(preferences.window.width, Math.max(800, area.width)), height: Math.min(preferences.window.height, Math.max(640, area.height)), minWidth: 800, minHeight: 640, backgroundColor: '#0b0d12', title: 'TikDesk', autoHideMenuBar: true, icon: path.join(__dirname, '../assets/icon.ico'), webPreferences: { ...securePreferences, preload: path.join(__dirname, 'preload.cjs') } });
   attachShortcuts(win.webContents);
@@ -317,24 +375,28 @@ async function createWindow() {
   wc.on('render-process-gone', () => failed('Proces strony został zakończony.'));
   win.on('resize', resize);
   win.on('close', event => {
-    if (!quitting && (preparingDownload || downloads.active || siteDownloads.size)) {
+    if (!quitting && (preparingDownload || downloads.active || queue?.active || siteDownloads.size)) {
       event.preventDefault();
       if (!closeConfirmation) {
         closeConfirmation = true;
         void dialog.showMessageBox(win, { type: 'question', title: 'Pobieranie w toku', message: 'Trwa pobieranie. Anulować je i zamknąć aplikację?', buttons: ['Zostań', 'Anuluj pobieranie i zamknij'], defaultId: 0, cancelId: 0 }).then(async ({ response }) => {
           if (response === 1) {
+            await queue.setPaused(true);
+            if (queue.active) void queue.cancel(queue.active.row.id).catch(error => diagnostics.record('storage', error));
             preparingController?.abort(new Error('Pobieranie anulowane.')); downloads.cancel();
             for (const item of siteDownloads) item.cancel();
-            while (preparingDownload || downloads.active || siteDownloads.size) await new Promise(resolve => setTimeout(resolve, 40));
+            const deadline = Date.now() + 3000;
+            while ((preparingDownload || downloads.active || queue.active || siteDownloads.size) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 40));
+            if (preparingDownload || downloads.active || queue.active || siteDownloads.size) { app.exit(0); return; }
             app.quit();
           }
-        }).finally(() => { closeConfirmation = false; });
+        }).catch(error => { diagnostics.record('application', error); broadcast({ notice: 'Nie udało się zakończyć pobierania. Spróbuj ponownie.' }); }).finally(() => { closeConfirmation = false; });
       }
       return;
     }
     const bounds = win.getNormalBounds();
     preferences.window = { width: bounds.width, height: bounds.height, maximized: win.isMaximized() };
-    if (!quitting) void savePreferences();
+    if (!quitting) void savePreferences().catch(() => {});
     tikSession.flushStorageData();
   });
   win.on('closed', () => {
@@ -348,46 +410,15 @@ async function createWindow() {
   remoteReady = true;
   if (preferences.window.maximized) win.maximize();
   setMode(preferences.mode);
-  if (smoke && process.argv.includes('--preferences-write')) {
-    await setTheme('light');
-    setMode('desktop');
-    preferences.muted = true; wc.setAudioMuted(true);
-    preferences.startup = 'last';
-    preferences.downloadDirectory = path.join(app.getPath('temp'), 'TikDeskSavedDownloads');
-    bookmarks = [{ id: randomUUID(), title: 'Test zakładki', url: `${HOME}@test` }];
-    await saveJson('bookmarks.json', bookmarks);
-    win.setSize(1040, 760);
-    await savePreferences();
-    win.close();
-    return;
+  if (smoke) {
+    if (app.isPackaged) return verifyPackage();
+    const context = { app, win, view, tikSession, nativeTheme, dialog, area, setTheme, setMode, broadcast, failed, navigate, downloadVideo, savePreferences, saveJson, downloads, queue, permissions,
+      get preferences() { return preferences; }, get state() { return state; }, get bookmarks() { return bookmarks; }, set bookmarks(value) { bookmarks = value; },
+      get preparingDownload() { return preparingDownload; }, set preparingDownload(value) { preparingDownload = value; }, get closeConfirmation() { return closeConfirmation; }, get lastVideoDownload() { return lastVideoDownload; } };
+    const tests = require('../scripts/smoke.cjs');
+    if (await tests.preferencePhase(context)) return;
+    return tests.runSmoke(context);
   }
-  if (smoke && process.argv.includes('--preferences-read')) {
-    const [width, height] = win.getSize();
-    const cookies = await tikSession.cookies.get({ url: HOME, name: 'tiktok_webapp_theme' });
-    const expectedWidth = Math.min(1040, Math.max(800, area.width));
-    const expectedHeight = Math.min(760, Math.max(640, area.height));
-    if (preferences.theme !== 'light' || preferences.mode !== 'desktop' || !wc.isAudioMuted() || width !== expectedWidth || height !== expectedHeight || cookies[0]?.value !== 'light') throw new Error('Ustawienia nie przetrwały restartu aplikacji.');
-    if (preferences.startup !== 'last' || preferences.downloadDirectory !== path.join(app.getPath('temp'), 'TikDeskSavedDownloads') || bookmarks[0]?.url !== `${HOME}@test`) throw new Error('Nowe ustawienia lub zakładki nie przetrwały restartu.');
-    console.log('Preferences restart roundtrip passed.');
-    wc.emit('before-mouse-event', {}, { type: 'mouseDown' });
-    await tikSession.cookies.set({ url: HOME, domain: '.tiktok.com', path: '/', name: 'tiktok_webapp_theme_source', value: 'manual', secure: true });
-    await tikSession.cookies.set({ url: HOME, domain: '.tiktok.com', path: '/', name: 'tiktok_webapp_theme', value: 'dark', secure: true });
-    win.close();
-    return;
-  }
-  if (smoke && process.argv.includes('--preferences-read-manual')) {
-    if (preferences.theme !== 'dark') throw new Error('Motyw zmieniony tuż przed zamknięciem nie został zapisany.');
-    console.log('Immediate manual theme restart roundtrip passed.');
-    wc.emit('before-mouse-event', {}, { type: 'mouseDown' });
-    await tikSession.cookies.set({ url: HOME, domain: '.tiktok.com', path: '/', name: 'tiktok_webapp_theme_source', value: 'auto', secure: true });
-    win.close(); return;
-  }
-  if (smoke && process.argv.includes('--preferences-read-system')) {
-    if (preferences.theme !== 'system') throw new Error('Systemowy motyw TikToka nie przetrwał restartu.');
-    console.log('System theme restart roundtrip passed.');
-    win.close(); return;
-  }
-  if (smoke) return runSmoke();
   void navigate(preferences.startup === 'last' && isTikTok(preferences.lastUrl) ? preferences.lastUrl : HOME).then(() => { if (!wc.isDestroyed()) { wc.navigationHistory.clear(); broadcast(); } });
 }
 ipcMain.handle('command', async (event, command, value) => {
@@ -397,6 +428,46 @@ ipcMain.handle('command', async (event, command, value) => {
     switch (command) {
       case 'state': broadcast(); break;
       case 'dialog': modalOpen = value === true; view.setVisible(!modalOpen && !state.error); break;
+      case 'libraries-refresh': await downloads.refreshFiles(); break;
+      case 'download-remove':
+        if (await confirm('Usunąć wpis z historii?', 'Plik filmu pozostanie na dysku. Ewentualny częściowy plik tego zadania zostanie usunięty.')) await downloads.remove(value);
+        break;
+      case 'downloads-clear':
+        if (await confirm('Wyczyścić historię pobrań?', 'Usunie zakończone wpisy i ich częściowe pliki. Zapisane filmy pozostaną na dysku.')) for (const row of downloads.list()) if (row.id !== downloads.active?.record.id) await downloads.remove(row.id);
+        break;
+      case 'download-cleanup':
+        if (await confirm('Usunąć częściowy plik?', 'Dotyczy tylko pliku tymczasowego tego zadania.')) await downloads.cleanup(value);
+        break;
+      case 'queue-add': await addToQueue(); break;
+      case 'queue-pause': await queue.setPaused(true); break;
+      case 'queue-start': if (preparingDownload || downloads.active) throw new Error('Poczekaj na zakończenie bieżącego pobierania.'); await queue.setPaused(false); break;
+      case 'queue-cancel': await queue.cancel(value); break;
+      case 'queue-remove': await queue.remove(value); break;
+      case 'diagnostics': broadcast({ diagnosticReport: diagnostics.report({ version: app.getVersion(), versions: process.versions, platform: process.platform, downloads: downloads.records.length, queued: queue.rows.filter(row => row.status === 'queued').length }) }); break;
+      case 'diagnostics-copy': clipboard.writeText(diagnostics.report({ version: app.getVersion(), versions: process.versions, platform: process.platform, downloads: downloads.records.length, queued: queue.rows.filter(row => row.status === 'queued').length })); broadcast({ notice: 'Raport diagnostyczny skopiowany.' }); break;
+      case 'privacy-refresh': broadcast({ cacheBytes: await tikSession.getCacheSize() }); break;
+      case 'cache-clear': if (await confirm('Wyczyścić pamięć podręczną?', 'Zachowa sesję konta, zakładki i pobrane filmy.')) { await tikSession.clearCache(); broadcast({ cacheBytes: await tikSession.getCacheSize(), notice: 'Pamięć podręczna wyczyszczona.' }); } break;
+      case 'permission-revoke': {
+        const row = permissions.revoke(value);
+        broadcast();
+        if (row) { for (const popup of popups) if (isTikTok(popup.webContents.getURL())) popup.webContents.reload(); await navigate(isTikTok(wc.getURL()) ? wc.getURL() : HOME); }
+        break;
+      }
+      case 'shortcuts-save': preferences.shortcuts = normalizeShortcuts(value); await savePreferences(); broadcast({ notice: 'Skróty zapisane.' }); break;
+      case 'shortcuts-reset': preferences.shortcuts = normalizeShortcuts(); await savePreferences(); broadcast({ notice: 'Przywrócono skróty domyślne.' }); break;
+      case 'bookmark-export': {
+        const result = await dialog.showSaveDialog(win, { title: 'Eksportuj zakładki', defaultPath: path.join(app.getPath('documents'), 'TikDesk-zakladki.json'), filters: [{ name: 'Zakładki JSON', extensions: ['json'] }] });
+        if (result.filePath) { await fs.writeFile(result.filePath, exportBookmarks(bookmarks), 'utf8'); broadcast({ notice: 'Zakładki wyeksportowane.' }); } break;
+      }
+      case 'bookmark-import': {
+        const result = await dialog.showOpenDialog(win, { title: 'Importuj zakładki', filters: [{ name: 'Zakładki JSON', extensions: ['json'] }], properties: ['openFile'] });
+        if (!result.canceled && result.filePaths[0]) {
+          const file = await fs.open(result.filePaths[0], 'r'); let text;
+          try { if ((await file.stat()).size > 1024 * 1024) throw new Error('Plik przekracza 1 MB.'); const buffer = Buffer.alloc(1024 * 1024 + 1); const read = await file.read(buffer); if (read.bytesRead > 1024 * 1024) throw new Error('Plik przekracza 1 MB.'); text = buffer.subarray(0, read.bytesRead).toString('utf8'); } finally { await file.close(); }
+          const imported = importBookmarks(text, bookmarks);
+          if (await confirm('Zaimportować zakładki?', `Nowe: ${imported.added}. Pominięte duplikaty: ${imported.duplicates}.`)) { await saveJson('bookmarks.json', imported.rows); bookmarks = imported.rows; broadcast(); }
+        } break;
+      }
       case 'navigate':
         if (!Object.hasOwn(ROUTES, value)) throw new Error('Nieznany widok.');
         if (value === 'upload' || value === 'login') { setMode('desktop'); await savePreferences(); }
@@ -414,12 +485,12 @@ ipcMain.handle('command', async (event, command, value) => {
       case 'mute': wc.setAudioMuted(!wc.isAudioMuted()); preferences.muted = wc.isAudioMuted(); broadcast({ muted: preferences.muted }); await savePreferences(); break;
       case 'fullscreen': win.setFullScreen(!win.isFullScreen()); break;
       case 'copy-link': {
-        const video = await wc.executeJavaScript(VIDEO_SCRIPT);
+        const video = await inspectVideo();
         if (!isTikTok(video.pageUrl)) throw new Error('Nie znaleziono linku do filmu. Otwórz jego szczegóły i spróbuj ponownie.');
         clipboard.writeText(video.pageUrl); broadcast({ notice: 'Link do filmu skopiowany.' }); break;
       }
       case 'browser': await external(isTikTok(wc.getURL()) ? wc.getURL() : HOME); break;
-      case 'download': await downloadVideo(); break;
+      case 'download': if (queue.active) throw new Error('Poczekaj na kolejkę lub ją wstrzymaj.'); await downloadVideo(); break;
       case 'cancel-download': preparingController?.abort(new Error('Pobieranie anulowane.')); downloads.cancel(); break;
       case 'download-open':
       case 'download-folder': {
@@ -433,11 +504,11 @@ ipcMain.handle('command', async (event, command, value) => {
       case 'download-retry': {
         const row = downloads.records.find(row => row.id === value);
         if (!row || !row.videoId || !isTikTok(row.pageUrl)) throw new Error('Otwórz ten film i kliknij Pobierz, aby spróbować ponownie.');
-        if (preparingDownload || downloads.active) throw new Error('Pobieranie jest już w toku.');
+        if (preparingDownload || downloads.active || queue.active) throw new Error('Pobieranie jest już w toku.');
         await navigate(row.pageUrl);
         const deadline = Date.now() + 8000;
         let video;
-        do { video = await wc.executeJavaScript(VIDEO_SCRIPT); if (video.id === row.videoId && video.url) break; await new Promise(resolve => setTimeout(resolve, 200)); } while (Date.now() < deadline);
+        do { video = await inspectVideo(); if (video.id === row.videoId && video.url) break; await new Promise(resolve => setTimeout(resolve, 200)); } while (Date.now() < deadline);
         await downloadVideo(undefined, row.videoId); break;
       }
       case 'settings-save': {
@@ -448,10 +519,12 @@ ipcMain.handle('command', async (event, command, value) => {
         const selection = await dialog.showOpenDialog(win, { title: 'Folder pobierania', defaultPath: preferences.downloadDirectory || app.getPath('downloads'), properties: ['openDirectory', 'createDirectory'] });
         if (!selection.canceled && selection.filePaths[0]) { preferences.downloadDirectory = selection.filePaths[0]; await savePreferences(); broadcast(); } break;
       }
+      case 'bookmark-video':
       case 'bookmark-add': {
-        const url = wc.getURL();
+        const video = command === 'bookmark-video' ? await inspectVideo() : null;
+        const url = bookmarkUrl(video ? video.pageUrl : wc.getURL());
         if (!isTikTok(url) || /^\/(login|auth|passport)(\/|$)/.test(new URL(url).pathname)) throw new Error('Otwórz profil lub stronę TikToka, którą chcesz zapisać.');
-        if (bookmarks.some(row => row.url === url)) throw new Error('Ta strona jest już w zakładkach.');
+        if (bookmarks.some(row => bookmarkUrl(row.url) === url)) throw new Error('Ta strona jest już w zakładkach.');
         if (bookmarks.length >= 100) throw new Error('Możesz zapisać do 100 zakładek.');
         bookmarks.unshift({ id: randomUUID(), title: wc.getTitle().slice(0, 100) || 'TikTok', url });
         await saveJson('bookmarks.json', bookmarks); broadcast(); break;
@@ -467,168 +540,32 @@ ipcMain.handle('command', async (event, command, value) => {
       case 'reset': {
         const { response } = await dialog.showMessageBox(win, { type: 'warning', title: 'Usuń lokalną sesję', message: 'Wylogować konto i usunąć dane TikToka z TikDesk?', detail: 'Usuwa cookies, pamięć strony i lokalną sesję. Twoje konto i opublikowane filmy pozostaną na TikToku.', buttons: ['Anuluj', 'Usuń sesję'], defaultId: 0, cancelId: 0 });
         if (response === 1) {
+          await queue.setPaused(true);
+          if (queue.active) await queue.cancel(queue.active.row.id);
+          preparingController?.abort(new Error('Usuwanie sesji.')); downloads.cancel();
           for (const popup of popups) popup.destroy();
           wc.stop(); await wc.loadURL('about:blank');
           await tikSession.closeAllConnections();
           await tikSession.clearStorageData(); await tikSession.clearCache();
-          grants.clear(); await syncTikTokTheme(); await navigate(HOME);
+          permissions.clear(); await syncTikTokTheme(); await navigate(HOME);
         }
         break;
       }
       default: throw new Error('Nieznane polecenie.');
     }
     return { ok: true };
-  } catch (error) { return { ok: false, error: error.message }; }
+  } catch (error) { diagnostics.record(command.includes('download') ? 'download' : command.includes('queue') ? 'queue' : 'application', error); return { ok: false, error: error.message }; }
 });
 
-async function runSmoke() {
-  const directory = path.join(process.cwd(), 'artifacts');
-  await fs.mkdir(directory, { recursive: true });
-  const errors = [];
-  const screenshotWarnings = [];
-  win.webContents.on('console-message', event => { if (event.level === 'error') errors.push(event.message); });
+async function verifyPackage() {
   try {
-    await wcFixture();
-    const checks = await view.webContents.executeJavaScript('({node: typeof require, bridge: typeof window.tikdesk, width: innerWidth, ua: navigator.userAgent})');
-    if (checks.node !== 'undefined' || checks.bridge !== 'undefined' || checks.width !== 420) throw new Error(`Sandbox/layout: ${JSON.stringify(checks)}`);
-    const ui = await win.webContents.executeJavaScript(`(async () => { const s = await window.tikdesk.command('state'); const invalid = await window.tikdesk.command('open-link', 'https://tiktok.com.evil.invalid'); return { ready: !!document.querySelector('#mode-mobile'), state: s.ok, invalidBlocked: !invalid.ok }; })()`);
-    if (!ui.ready || !ui.state || !ui.invalidBlocked) throw new Error(`IPC/UI: ${JSON.stringify(ui)}`);
-    const invoke = (name, value) => win.webContents.executeJavaScript(`window.tikdesk.command(${JSON.stringify(name)}, ${JSON.stringify(value)})`);
-    const waitFor = async predicate => {
-      const end = Date.now() + 5000;
-      while (!(await predicate())) {
-        if (Date.now() > end) throw new Error('Smoke condition timeout');
-        await new Promise(resolve => setTimeout(resolve, 40));
-      }
-    };
-    tikSession.protocol.handle('https', () => new Response('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>TikDesk navigation fixture</title><h1>Fixture</h1>', { headers: { 'Content-Type': 'text/html' } }));
-    await invoke('open-link', `${HOME}test-first`);
-    await invoke('open-link', `${HOME}test-second`);
-    failed('Test przywracania strony po błędzie.');
-    await invoke('back');
-    await waitFor(() => view.webContents.getURL() === `${HOME}test-first` && view.getVisible() && !state.error);
-    await invoke('forward');
-    await waitFor(() => view.webContents.getURL() === `${HOME}test-second`);
-    await invoke('navigate', 'home');
-    if (view.webContents.getURL() !== HOME) throw new Error('Home navigation failed');
-    win.webContents.emit('before-input-event', { preventDefault() {} }, { type: 'keyDown', key: 'F11' });
-    await waitFor(() => win.isFullScreen());
-    win.webContents.emit('before-input-event', { preventDefault() {} }, { type: 'keyDown', key: 'F11' });
-    await waitFor(() => !win.isFullScreen());
-    await invoke('bookmark-add');
-    const added = bookmarks[0];
-    if (!added || added.url !== HOME) throw new Error('Zakładka nie została zapisana.');
-    if ((await invoke('bookmark-add')).ok) throw new Error('Zduplikowano zakładkę.');
-    await invoke('bookmark-open', added.id);
-    await invoke('bookmark-remove', added.id);
-    if (bookmarks.length) throw new Error('Zakładka nie została usunięta.');
-    await invoke('settings-save', { startup: 'last' });
-    if (preferences.startup !== 'last') throw new Error('Ustawienia startu nie zostały zapisane.');
-    await invoke('settings-save', { startup: 'home' });
-    const showMessageBox = dialog.showMessageBox;
-    let closeQuestions = 0;
-    try {
-      dialog.showMessageBox = async () => { closeQuestions++; return { response: 0 }; };
-      preparingDownload = true;
-      win.close();
-      await waitFor(() => closeQuestions === 1 && !closeConfirmation);
-      if (win.isDestroyed()) throw new Error('Zamknięto aplikację mimo wybrania Zostań.');
-    } finally { preparingDownload = false; dialog.showMessageBox = showMessageBox; }
-    await invoke('theme', 'light');
-    if (await win.webContents.executeJavaScript('document.documentElement.dataset.theme') !== 'light') throw new Error('Light shell theme failed');
-    await invoke('theme', 'dark');
-    await invoke('mute');
-    const savedPreferences = normalizePreferences(JSON.parse(await fs.readFile(path.join(app.getPath('userData'), 'preferences.json'), 'utf8')));
-    if (savedPreferences.theme !== 'dark' || !savedPreferences.muted || !view.webContents.isAudioMuted()) throw new Error('Preferences not saved');
-    const themeCookie = (await tikSession.cookies.get({ url: HOME, name: 'tiktok_webapp_theme' }))[0];
-    if (themeCookie?.value !== 'dark') throw new Error('TikTok appearance cookie not saved');
-    view.webContents.emit('before-mouse-event', {}, { type: 'mouseDown' });
-    await tikSession.cookies.set({ url: HOME, domain: '.tiktok.com', path: '/', name: 'tiktok_webapp_theme_source', value: 'manual', secure: true });
-    await tikSession.cookies.set({ url: HOME, domain: '.tiktok.com', path: '/', name: 'tiktok_webapp_theme', value: 'light', secure: true });
-    await waitFor(() => preferences.theme === 'light');
-    await tikSession.cookies.set({ url: HOME, domain: '.tiktok.com', path: '/', name: 'tiktok_webapp_theme_source', value: 'auto', secure: true });
-    await waitFor(() => preferences.theme === 'system');
-    await invoke('theme', 'dark');
-    await new Promise(resolve => setTimeout(resolve, 350));
-    if (preferences.theme !== 'dark') throw new Error('Własny zapis cookies nadpisał motyw.');
-    const invalidTheme = await invoke('theme', 'invalid');
-    if (invalidTheme.ok || preferences.theme !== 'dark') throw new Error('Invalid theme accepted');
-    await invoke('mute');
-    await tikSession.protocol.unhandle('https');
-    await wcFixture();
-    await win.webContents.executeJavaScript(`window.tikdesk.command('dialog', true)`);
-    if (view.getVisible()) throw new Error('Strona zasłania lokalny dialog');
-    await win.webContents.executeJavaScript(`window.tikdesk.command('dialog', false)`);
-    if (!view.getVisible()) throw new Error('Strona nie wróciła po zamknięciu dialogu');
-    setMode('desktop');
-    if (view.getBounds().width <= 420) throw new Error('Tryb desktop nie poszerza widoku');
-    setMode('mobile');
-    await new Promise(resolve => setTimeout(resolve, 700));
-    // A native child view can make parent capture unavailable on Windows.
-    const capture = async (contents, name) => {
-      try { await fs.writeFile(path.join(directory, name), (await contents.capturePage()).toPNG()); }
-      catch (error) { screenshotWarnings.push(`${name}: ${error.message}`); }
-    };
-    await capture(win.webContents, 'shell.png');
-    await capture(view.webContents, 'fixture.png');
-    failed('Test kontrolowany: brak połączenia.');
-    await new Promise(resolve => setTimeout(resolve, 250));
-    const errorVisible = await win.webContents.executeJavaScript(`!document.querySelector('#error').hidden`);
-    if (!errorVisible) throw new Error('Brak widoku błędu');
-    await capture(win.webContents, 'offline.png');
-    view.setVisible(true); broadcast({ error: '' });
-    if (errors.length) throw new Error(`Renderer errors: ${errors.join('; ')}`);
-    const result = { passed: true, checks, ui, navigation: true, errorRecovery: true, localShortcuts: true, bookmarks: true, startupSettings: true, closeWarning: true, preferencesSaved: true, themeCookieSaved: true, manualThemeSynced: true, systemThemeSynced: true, dialogVisibility: true, errorVisible, errors, screenshotWarnings };
-    if (process.argv.includes('--live')) {
-      if (process.argv.includes('--desktop-live')) setMode('desktop');
-      await Promise.race([navigate(HOME), new Promise((_, reject) => setTimeout(() => reject(new Error('TikTok: przekroczono 45 sekund')), 45000))]);
-      result.live = { url: view.webContents.getURL(), error: state.error, title: view.webContents.getTitle() };
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      if (preferences.theme !== 'dark') throw new Error('Strona nadpisała zapisany motyw aplikacji.');
-      if (process.argv.includes('--theme-probe')) result.live.theme = await view.webContents.executeJavaScript(`({attrs:[...document.documentElement.attributes].map(a=>[a.name,a.value]),storage:Object.keys(localStorage).filter(k=>/theme|dark|appearance/i.test(k)).map(k=>[k,localStorage.getItem(k)]),cookies:document.cookie.split(';').filter(s=>/theme|dark|appearance/i.test(s.split('=')[0]))})`);
-      if (process.argv.includes('--theme-probe')) result.live.theme.domains = (await tikSession.cookies.get({ url: HOME })).filter(cookie => cookie.name.startsWith('tiktok_webapp_theme')).map(({ name, domain, value }) => ({ name, domain, value }));
-      const media = await view.webContents.executeJavaScript(VIDEO_SCRIPT);
-      result.live.media = media.error ? { error: media.error } : { host: new URL(media.url).hostname, source: media.source, allowed: isMediaUrl(media.url), pageUrl: media.pageUrl };
-      if (process.argv.includes('--download-live') && media.error) throw new Error(media.error);
-      if (process.argv.includes('--download-live') && !media.error) {
-        const output = path.join(directory, process.argv.includes('--desktop-live') ? 'download-desktop.mp4' : 'download-mobile.mp4');
-        await downloadVideo(output);
-        await new Promise((resolve, reject) => {
-          const deadline = Date.now() + 60000;
-          const poll = setInterval(() => {
-            if (!state.download) { clearInterval(poll); resolve(); }
-            else if (Date.now() > deadline) { clearInterval(poll); downloads.cancel(); reject(new Error('Download timeout')); }
-          }, 200);
-        });
-        if (lastVideoDownload?.status !== 'completed') throw new Error(`Download failed: ${JSON.stringify(lastVideoDownload)}`);
-        const file = await fs.open(output, 'r');
-        try {
-          const header = Buffer.alloc(32);
-          await file.read(header, 0, header.length, 0);
-          const size = (await file.stat()).size;
-          if (size < 1000 || header.toString('ascii', 4, 8) !== 'ftyp') throw new Error('Pobrany plik nie jest MP4');
-          result.live.download = { passed: true, bytes: size, mp4: true };
-        } finally { await file.close(); }
-      }
-      await capture(view.webContents, 'tiktok.png');
-      result.live.page = await view.webContents.executeJavaScript('({title: document.title, text: document.body.innerText.slice(0, 2000)})');
-    }
-    for (const panel of ['downloads', 'bookmarks', 'settings']) {
-      await invoke('dialog', true);
-      await win.webContents.executeJavaScript(`document.querySelector('#${panel}-dialog').showModal()`);
-      await new Promise(resolve => setTimeout(resolve, 200));
-      await capture(win.webContents, `${panel}-panel.png`);
-      await win.webContents.executeJavaScript(`document.querySelector('#${panel}-dialog').close()`);
-      await invoke('dialog', false);
-    }
-    await fs.writeFile(path.join(directory, 'smoke.json'), JSON.stringify(result, null, 2));
-    console.log(JSON.stringify(result));
+    const check = await view.webContents.executeJavaScript('({ node: typeof require, bridge: typeof window.tikdesk })');
+    const local = await win.webContents.executeJavaScript("window.tikdesk.command('state')");
+    if (check.node !== 'undefined' || check.bridge !== 'undefined' || !local.ok) throw new Error('Package isolation failed');
+    const directory = path.join(process.cwd(), 'artifacts'); await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'package-smoke.json'), JSON.stringify({ passed: true, version: app.getVersion(), check }));
     app.exit(0);
   } catch (error) { console.error(error); app.exit(1); }
-}
-async function wcFixture() {
-  await view.webContents.loadURL('data:text/html,<meta name="viewport" content="width=device-width,initial-scale=1"><body style="background:%230b0d12;color:white;font:24px sans-serif">TikDesk sandbox test</body>');
-  broadcast({ loading: false });
 }
 
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -639,7 +576,7 @@ else {
   });
   app.on('before-quit', event => {
     if (quitting) return;
-    if (preparingDownload || downloads?.active || siteDownloads.size) {
+    if (preparingDownload || downloads?.active || queue?.active || siteDownloads.size) {
       event.preventDefault();
       if (win && !closeConfirmation) win.close();
       return;
@@ -650,14 +587,15 @@ else {
     if (win && !win.isDestroyed()) {
       const bounds = win.getNormalBounds();
       preferences.window = { width: bounds.width, height: bounds.height, maximized: win.isMaximized() };
-      void savePreferences();
+      void savePreferences().catch(() => {});
     }
-    (async () => {
+    bounded((async () => {
       await adoptTikTokTheme(pendingThemeDomain);
       await savePreferences();
       await themeQueue;
       await tikSession?.cookies.flushStore();
-    })().catch(error => console.error(error.message)).finally(() => app.quit());
+      await bounded(closeNetwork(), { timeoutMs: 1000 }).catch(() => {});
+    })(), { timeoutMs: 5000 }).catch(async error => { diagnostics.record('storage', error); if (!smoke) await dialog.showMessageBox({ type: 'error', title: 'Ustawienia nie zostały zapisane', message: 'Sprawdź wolne miejsce i uprawnienia do profilu aplikacji. Ostatnie zmiany mogą nie przetrwać restartu.' }); }).finally(() => app.quit());
   });
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
   app.whenReady().then(() => { Menu.setApplicationMenu(null); return createWindow(); }).catch(error => { console.error(error); app.exit(1); });
